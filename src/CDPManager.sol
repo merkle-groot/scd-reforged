@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
-import { DSMath } from "./lib/DSMath.sol";
+import { DSMath } from "src/lib/DSMath.sol";
+import {console} from "forge-std/console.sol";
 
 contract CDPManager {
     // compound interest calculated every sec on debt
@@ -15,41 +16,60 @@ contract CDPManager {
     // multiplier for stability + governance fee
     uint totalFeeMul;
 
+    constructor(
+        uint _stabilityFee,
+        uint _governanceFee
+    ) {
+        stabilityFee = _stabilityFee;
+        governanceFee = _governanceFee;
+
+        stabilityFeeMul = DSMath.RAY;
+        totalFeeMul = DSMath.RAY;
+        lastUpdatedAt = block.timestamp;
+    }
+
     function getStabilityFeeMul() public returns(uint){
-        update_multipliers();
+        updateMultipliers();
         return stabilityFeeMul;
     }
 
     function getTotalFeeMul() public returns(uint){
-        update_multipliers();
+        updateMultipliers();
         return totalFeeMul;
     }
 
-    function update_multipliers() internal {
-        uint current_timestamp = block.timestamp;
-        uint age = lastUpdatedAt - current_timestamp;
+    function updateMultipliers() internal {
+        uint currentTimestamp = block.timestamp;
+        uint age = currentTimestamp - lastUpdatedAt;
 
         // 0 sec elapsed
         if (age == 0) return;
 
+        lastUpdatedAt = currentTimestamp;
+
         // calculate stability mul
-        uint pending_multiplier = DSMath.RAY;
+        uint pendingMultiplier = DSMath.RAY;
 
         if (stabilityFee != DSMath.RAY) {
-            pending_multiplier = DSMath.rpow(stabilityFee, age);
-            stabilityFeeMul = DSMath.rmul(stabilityFeeMul, pending_multiplier);
-
+            pendingMultiplier = DSMath.rpow(stabilityFee, age);
+            stabilityFeeMul = DSMath.rmul(stabilityFeeMul, pendingMultiplier);
+            console.log("stability", pendingMultiplier);
             // Todo(merkle-groot): mint fees to the tap contract 
         }
 
         // calculate total fee mul 
         // governance fee is an optional fee, if it's not enables skip
         if (governanceFee != DSMath.RAY) {
-            pending_multiplier = DSMath.rmul(pending_multiplier, DSMath.rpow(governanceFee, age));
+            pendingMultiplier = DSMath.rmul(pendingMultiplier, DSMath.rpow(governanceFee, age));
+            console.log("stability*gov", pendingMultiplier);
+            
         }
 
-        if (pending_multiplier != DSMath.RAY) {
-            totalFeeMul = DSMath.rmul(totalFeeMul, pending_multiplier);
+        if (pendingMultiplier != DSMath.RAY) {
+            totalFeeMul = DSMath.rmul(totalFeeMul, pendingMultiplier);
+            console.log("totalFeeMul", totalFeeMul);
         }
     }
+
+    
 }

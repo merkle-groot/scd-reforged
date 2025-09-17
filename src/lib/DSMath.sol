@@ -45,10 +45,10 @@ library DSMath {
 
         while(n != 0){
             if(n % 2 == 1){
-                result = result * x;
+                result = rmul(result, x);
             }  
 
-            x = x * x;
+            x = rmul(x, x);
             n = n / 2;
         }
 
