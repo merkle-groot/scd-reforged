@@ -1,9 +1,51 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 import { DSMath } from "src/lib/DSMath.sol";
-import {console} from "forge-std/console.sol";
+import { console } from "forge-std/console.sol";
+import { Token } from "src/lib/Token.sol";
+import { Liquidator } from "src/Liquidator.sol";
+import { TrustedOracle } from "src/lib/TrustedOracle.sol";
 
 contract CDPManager {
+    // tokens
+    // single collateral dai aka SAI token
+    Token scd;
+    // token that tracks bad debt in the system
+    Token sin;
+    // collateral token
+    Token weth;
+    // locked collateral token; claim on collateral
+    Token peth;
+    // governance token
+    Token gov;
+
+    // oracles
+    TrustedOracle wethOracle;
+    TrustedOracle govOracle;
+    TrustedOracle scdOracle;
+
+    // vault
+    // serial id of vault
+    struct Vault {
+        address owner;
+        // amount of peth locked
+        uint lockedCollateral;
+        // tracker of scd drawn/stabilityFeeMul
+        uint normalizedDebt;
+        // tracker of scd drawn/totalFeeMul
+        uint normalizedTotalDebt;
+    }
+    uint currentVaultId = 0;
+    mapping(uint => Vault) vaultIdToVault;
+    uint minCollateralRatio;
+
+    // Spread between join and exit
+    uint spread;
+
+    // contracts
+    // liquidator
+    Liquidator liquidator;
+
     // compound interest calculated every sec on debt
     uint stabilityFee;
     // compound interest calculated every sec on debt + stability fee
@@ -15,10 +57,31 @@ contract CDPManager {
     uint stabilityFeeMul;
     // multiplier for stability + governance fee
     uint totalFeeMul;
+    // system debt  
+    uint totalDebt;
+
+    // system state
+    bool off = false;
+    bool out = false;
+
+    // events
+    event NewVault(address indexed owner, uint indexed vaultId);
+    event CollateralAdded(uint indexed vaultId, uint pethAmount);
 
     constructor(
         uint _stabilityFee,
-        uint _governanceFee
+        uint _governanceFee,
+        uint _spread,
+        Token _scd,
+        Token _sin,
+        Token _weth,
+        Token _peth,
+        Token _gov,
+        TrustedOracle _scdOracle,
+        TrustedOracle _wethOracle,
+        TrustedOracle _govOracle,
+        Liquidator _liquidator,
+        uint _minCollateralRatio
     ) {
         stabilityFee = _stabilityFee;
         governanceFee = _governanceFee;
@@ -26,6 +89,21 @@ contract CDPManager {
         stabilityFeeMul = DSMath.RAY;
         totalFeeMul = DSMath.RAY;
         lastUpdatedAt = block.timestamp;
+
+        spread = _spread;
+
+        scd = _scd;
+        sin = _sin;
+        weth = _weth;
+        peth = _peth;
+        gov = _gov;
+
+        scdOracle = _scdOracle;
+        wethOracle = _wethOracle;
+        govOracle = _govOracle;
+
+        liquidator = _liquidator;
+        minCollateralRatio = _minCollateralRatio;
     }
 
     function getStabilityFeeMul() public returns(uint){
@@ -38,7 +116,7 @@ contract CDPManager {
         return totalFeeMul;
     }
 
-    function updateMultipliers() internal {
+    function updateMultipliers() internal{
         uint currentTimestamp = block.timestamp;
         uint age = currentTimestamp - lastUpdatedAt;
 
@@ -51,10 +129,16 @@ contract CDPManager {
         uint pendingMultiplier = DSMath.RAY;
 
         if (stabilityFee != DSMath.RAY) {
+            uint previousStabilityFeeMul = stabilityFeeMul;
             pendingMultiplier = DSMath.rpow(stabilityFee, age);
             stabilityFeeMul = DSMath.rmul(stabilityFeeMul, pendingMultiplier);
             console.log("stability", pendingMultiplier);
-            // Todo(merkle-groot): mint fees to the tap contract 
+            
+            // Todo(merkle-groot): test
+            // Debt at t1 = totalDebt * previousStabilityFeeMul
+            // Debt at t2 = totalDebt * stabilityFeeMul
+            // New debt = totalDebt * stabilityFeeMul -  totalDebt * previousStabilityFeeMul
+            scd.mint(address(liquidator), DSMath.wmul(totalDebt, stabilityFeeMul - previousStabilityFeeMul));
         }
 
         // calculate total fee mul 
@@ -71,5 +155,87 @@ contract CDPManager {
         }
     }
 
-    
+    function ethLocked() internal view returns(uint){
+        return weth.balanceOf(address(this));
+    }
+
+    function pethMinted() internal view returns(uint){
+        return peth.totalSupply();
+    }
+
+    function ethPerPeth() internal view returns(uint){
+        return pethMinted() == 0 ? DSMath.RAY : DSMath.rdiv(ethLocked(), pethMinted());
+    }
+
+    function bid(uint pethAmount) internal view returns(uint){
+        return DSMath.rmul(DSMath.wmul(ethPerPeth(), pethAmount), spread);
+    }
+
+    function ask(uint pethAmount) internal view returns(uint){
+        return DSMath.rmul(DSMath.wmul(ethPerPeth(), pethAmount), 2 * DSMath.WAD - spread);
+    }
+
+    function join(uint pethAmount) external{
+        require(!off, "scd: The system is shutdown");
+        uint askAmount = ask(pethAmount);
+        require(askAmount > 0, "sdc: ask amount is 0");
+        require(weth.transferFrom(msg.sender, address(this), askAmount), "scd: Not enough balance/approval");
+        peth.mint(msg.sender, pethAmount);
+    }
+
+    function exit(uint pethAmount) external{
+        require(!off || out, "scd: The system is shutdown");
+        uint bidAmount = bid(pethAmount);
+        require(peth.transferFrom(msg.sender, address(this), pethAmount), "scd: Not enough balance/approval");
+        peth.burn(pethAmount);
+        require(weth.transfer(msg.sender, bidAmount));
+    }
+
+    // vault
+    function getDebt(uint vaultId) public view returns(uint){
+        return DSMath.rmul(vaultIdToVault[vaultId].normalizedDebt, stabilityFeeMul);
+    }
+
+    function getGovDebt(uint vaultId) public view returns(uint){
+        return  DSMath.rmul(vaultIdToVault[vaultId].normalizedTotalDebt, totalFeeMul) - getDebt(vaultId);
+    }
+
+    function isSafe(uint vaultId) public view returns(bool) {
+        uint collateralValue =  DSMath.rmul(ethPerPeth(),  DSMath.wmul(vaultIdToVault[vaultId].lockedCollateral, wethOracle.readPrice()));
+        uint debtValue =  DSMath.rmul(getDebt(vaultId),  DSMath.wmul(scdOracle.readPrice(), minCollateralRatio));
+
+        return debtValue > collateralValue;
+    }
+
+    function openVault() external {
+        require(!off, "scd: The system is shutdown");
+        vaultIdToVault[currentVaultId].owner = msg.sender;
+        currentVaultId++;
+
+        emit NewVault(msg.sender, currentVaultId - 1);
+    }
+
+    function lockCollateral(uint vaultId, uint pethAmount) external {
+        require(!off, "scd: The system is shutdown");
+        require(peth.transferFrom(msg.sender, address(this), pethAmount), "scd: Not enough balance/approval");
+        require(vaultId < currentVaultId, "scd: Invalid vault id");
+        vaultIdToVault[vaultId].lockedCollateral += pethAmount;
+
+        emit CollateralAdded(vaultId, pethAmount);
+    }
+
+    function drawScd(uint vaultId, uint scdAmount) external {
+        require(!off, "scd: The system is shutdown");
+
+        Vault storage vault = vaultIdToVault[vaultId];
+        require(vaultId < currentVaultId && vault.owner == msg.sender, "scd: Invalid vault id");
+
+        vault.normalizedDebt += DSMath.rdiv(scdAmount, stabilityFeeMul);
+        vault.normalizedTotalDebt += DSMath.rdiv(scdAmount, totalFeeMul);
+
+        // Check for safety of the vault
+        require(isSafe(vaultId), "scd: insufficient collateral in the vault");
+        scd.mint(msg.sender, scdAmount);
+    }
+
 }

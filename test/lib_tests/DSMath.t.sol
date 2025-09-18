@@ -65,4 +65,14 @@ contract DSMathTest is Test {
         assertEq(DSMath.rmul(b, a), c);
     }
 
+    function test_rdiv_wad() pure public {
+        uint a = 1 ether;
+        uint b = 1 ether;
+        uint c = 2 ether;
+        assertEq(DSMath.rdiv(a, b), DSMath.RAY);
+        assertEq(DSMath.rdiv(c, b), c * 10 ** 9);
+
+        
+    }
+
 }   
