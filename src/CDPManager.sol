@@ -11,7 +11,7 @@ contract CDPManager {
     // single collateral dai aka SAI token
     Token scd;
     // token that tracks bad debt in the system
-    Token sin;
+    Token toxic_peth;
     // collateral token
     Token weth;
     // locked collateral token; claim on collateral
@@ -36,7 +36,7 @@ contract CDPManager {
         uint normalizedTotalDebt;
     }
     uint currentVaultId = 0;
-    mapping(uint => Vault) vaultIdToVault;
+    mapping(uint => Vault) public vaultIdToVault;
     uint minCollateralRatio;
 
     // Spread between join and exit
@@ -54,11 +54,11 @@ contract CDPManager {
     // last updated timestamp
     uint lastUpdatedAt;
     // multiplier for stability fee
-    uint stabilityFeeMul;
+    uint public stabilityFeeMul;
     // multiplier for stability + governance fee
-    uint totalFeeMul;
+    uint public totalFeeMul;
     // system debt  
-    uint totalDebt;
+    uint public totalDebt;
 
     // system state
     bool off = false;
@@ -73,7 +73,7 @@ contract CDPManager {
         uint _governanceFee,
         uint _spread,
         Token _scd,
-        Token _sin,
+        Token _toxic_peth,
         Token _weth,
         Token _peth,
         Token _gov,
@@ -93,7 +93,7 @@ contract CDPManager {
         spread = _spread;
 
         scd = _scd;
-        sin = _sin;
+        toxic_peth = _toxic_peth;
         weth = _weth;
         peth = _peth;
         gov = _gov;
@@ -163,7 +163,7 @@ contract CDPManager {
         return peth.totalSupply();
     }
 
-    function ethPerPeth() internal view returns(uint){
+    function ethPerPeth() public view returns(uint){
         return pethMinted() == 0 ? DSMath.RAY : DSMath.rdiv(ethLocked(), pethMinted());
     }
 
@@ -202,17 +202,19 @@ contract CDPManager {
 
     function isSafe(uint vaultId) public view returns(bool) {
         uint collateralValue =  DSMath.rmul(ethPerPeth(),  DSMath.wmul(vaultIdToVault[vaultId].lockedCollateral, wethOracle.readPrice()));
-        uint debtValue =  DSMath.rmul(getDebt(vaultId),  DSMath.wmul(scdOracle.readPrice(), minCollateralRatio));
-
-        return debtValue > collateralValue;
+        uint debtValue =  DSMath.wmul(getDebt(vaultId),  DSMath.wmul(scdOracle.readPrice(), minCollateralRatio));
+        console.log("collateralValue: ", collateralValue);
+        console.log("debtValue: ", debtValue);
+        return debtValue < collateralValue;
     }
 
-    function openVault() external {
+    function openVault() external returns (uint) {
         require(!off, "scd: The system is shutdown");
         vaultIdToVault[currentVaultId].owner = msg.sender;
-        currentVaultId++;
 
-        emit NewVault(msg.sender, currentVaultId - 1);
+        emit NewVault(msg.sender, currentVaultId);
+        currentVaultId++;
+        return currentVaultId - 1;
     }
 
     function lockCollateral(uint vaultId, uint pethAmount) external {
@@ -232,10 +234,9 @@ contract CDPManager {
 
         vault.normalizedDebt += DSMath.rdiv(scdAmount, stabilityFeeMul);
         vault.normalizedTotalDebt += DSMath.rdiv(scdAmount, totalFeeMul);
-
-        // Check for safety of the vault
+        totalDebt += DSMath.rdiv(scdAmount, stabilityFeeMul);
+        // Check for the safety of the vault
         require(isSafe(vaultId), "scd: insufficient collateral in the vault");
         scd.mint(msg.sender, scdAmount);
     }
-
 }

@@ -27,8 +27,8 @@ contract TokenFactory {
         string memory name, 
         string memory symbol,
         address initialOwner
-    ) external returns (address) {
+    ) external returns (Token) {
         // Todo(merkle-groot): maybe make this create2?
-        return address(new Token(name, symbol, initialOwner));
+        return new Token(name, symbol, initialOwner);
     }
 }
