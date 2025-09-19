@@ -192,19 +192,19 @@ contract CDPManager {
     }
 
     // vault
-    function getDebt(uint vaultId) public view returns(uint){
-        return DSMath.rmul(vaultIdToVault[vaultId].normalizedDebt, stabilityFeeMul);
+    function getDebt(uint vaultId) public returns(uint){
+        return DSMath.rmul(vaultIdToVault[vaultId].normalizedDebt, getStabilityFeeMul());
     }
 
-    function getGovDebt(uint vaultId) public view returns(uint){
+    function getGovDebt(uint vaultId) public returns(uint){
         return  DSMath.rmul(vaultIdToVault[vaultId].normalizedTotalDebt, totalFeeMul) - getDebt(vaultId);
     }
 
-    function isSafe(uint vaultId) public view returns(bool) {
+    function isSafe(uint vaultId) public returns(bool) {
         uint collateralValue =  DSMath.rmul(ethPerPeth(),  DSMath.wmul(vaultIdToVault[vaultId].lockedCollateral, wethOracle.readPrice()));
         uint debtValue =  DSMath.wmul(getDebt(vaultId),  DSMath.wmul(scdOracle.readPrice(), minCollateralRatio));
-        console.log("collateralValue: ", collateralValue);
-        console.log("debtValue: ", debtValue);
+        console.log("===> collateralValue: ", collateralValue);
+        console.log("===> debtValue: ", debtValue);
         return debtValue < collateralValue;
     }
 
@@ -232,9 +232,13 @@ contract CDPManager {
         Vault storage vault = vaultIdToVault[vaultId];
         require(vaultId < currentVaultId && vault.owner == msg.sender, "scd: Invalid vault id");
 
-        vault.normalizedDebt += DSMath.rdiv(scdAmount, stabilityFeeMul);
+        console.log("dai taken: ", scdAmount);
+        vault.normalizedDebt += DSMath.rdiv(scdAmount, getStabilityFeeMul());
         vault.normalizedTotalDebt += DSMath.rdiv(scdAmount, totalFeeMul);
-        totalDebt += DSMath.rdiv(scdAmount, stabilityFeeMul);
+
+        console.log("normalizedDebt increment: ", DSMath.rdiv(scdAmount, getTotalFeeMul()));
+        console.log("normalizedTotalDebt increment: ", DSMath.rdiv(scdAmount, totalFeeMul));
+        totalDebt += DSMath.rdiv(scdAmount, getStabilityFeeMul());
         // Check for the safety of the vault
         require(isSafe(vaultId), "scd: insufficient collateral in the vault");
         scd.mint(msg.sender, scdAmount);

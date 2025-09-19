@@ -50,6 +50,18 @@ contract CDPManagerTest is Test{
     // 10 usd
     uint govOraclePrice = 10 * DSMath.WAD;
 
+    function beforeTestSetup(
+        bytes4 testSelector
+    ) public pure returns (bytes[] memory beforeTestCalldata) {
+        if (
+            testSelector == this.test_multiple_drawing_scd.selector ||
+            testSelector == this.test_draw_scd_insufficient_collateral.selector
+        ) {
+            beforeTestCalldata = new bytes[](1);
+            beforeTestCalldata[0] = abi.encodePacked(this.test_drawing_scd.selector);
+        }
+    }
+
     function setUp() public {
         TokenFactory token_factory = new TokenFactory();
         scd = token_factory.deployToken("single collateral dai", "SCD", owner);
@@ -126,7 +138,7 @@ contract CDPManagerTest is Test{
         assertEq(scd.balanceOf(address(liquidator)), 0);
     }
 
-    function test_drawing_scd() public{
+    function test_drawing_scd() public {
         address alice = users[0];
         vm.startPrank(alice);
 
@@ -163,7 +175,7 @@ contract CDPManagerTest is Test{
         assertEq(cdp_peth_balance_after_lock, deposit_amount);
 
         // check the vault
-        (address vaultOwner, uint lockedCollateral, uint _normalizedDebt, uint _normalizedTotalDebt) = cdp.vaultIdToVault(vaultId);
+        (address vaultOwner, uint lockedCollateral, , ) = cdp.vaultIdToVault(vaultId);
         assertEq(lockedCollateral, deposit_amount);
         assertEq(vaultOwner, alice);
 
@@ -186,13 +198,58 @@ contract CDPManagerTest is Test{
         uint aliceSCDBalanceAfter = scd.balanceOf(alice);
         assertEq(aliceSCDBalanceAfter, aliceSCDBalanceBefore + scdDrawn);
 
-        (, , uint normalizedDebtAfter, uint normalizedTotalDebt) = cdp.vaultIdToVault(vaultId);
+        (, , uint normalizedDebt, uint normalizedTotalDebt) = cdp.vaultIdToVault(vaultId);
         assertEq(lockedCollateral, deposit_amount);
         assertEq(vaultOwner, alice);
-        assertEq(normalizedDebtAfter, DSMath.rdiv(scdDrawn, cdp.stabilityFeeMul()));
+        assertEq(normalizedDebt, DSMath.rdiv(scdDrawn, cdp.stabilityFeeMul()));
         assertEq(normalizedTotalDebt, DSMath.rdiv(scdDrawn, cdp.totalFeeMul()));
         assertEq(cdp.totalDebt(),  DSMath.rdiv(scdDrawn, cdp.stabilityFeeMul()));
     }
 
+    function test_multiple_drawing_scd() public {
+        address alice = users[0];
+        vm.startPrank(alice);
+
+        uint vaultId = 0;
+        // try drawing 10 scd
+        uint scdDrawn = 10 * DSMath.WAD;
+        ( , , uint normalizedDebtBefore, uint normalizedTotalDebtBefore) = cdp.vaultIdToVault(vaultId);
+        uint aliceSCDBalanceBefore = scd.balanceOf(alice);
+        uint totalDebtBefore = cdp.totalDebt();
+        
+        cdp.drawScd(vaultId, scdDrawn);
+        ( , , uint normalizedDebtAfter, uint normalizedTotalDebtAfter) = cdp.vaultIdToVault(vaultId);
+        uint aliceSCDBalanceAfter = scd.balanceOf(alice);
+        uint totalDebtAfter = cdp.totalDebt();
+
+        assertEq(aliceSCDBalanceAfter, aliceSCDBalanceBefore + scdDrawn);
+        assertEq(normalizedDebtAfter, normalizedDebtBefore + DSMath.rdiv(scdDrawn, cdp.getStabilityFeeMul()));
+        assertEq(normalizedTotalDebtAfter, normalizedTotalDebtBefore + DSMath.rdiv(scdDrawn, cdp.getTotalFeeMul()));
+        assertEq(totalDebtAfter, totalDebtBefore + DSMath.rdiv(scdDrawn, cdp.getStabilityFeeMul()));
+        
+        vm.stopPrank();
+    }
+
+    function test_rever_draw_scd_insufficient_collateral() public {
+        address alice = users[0];
+        vm.startPrank(alice);
+
+        uint vaultId = 0;
+        
+        // total debt 
+        uint totalDebt = cdp.getDebt(vaultId);
+        ( ,uint lockedCollateral, , ) = cdp.vaultIdToVault(vaultId);
+        uint collateralValue = DSMath.rmul(cdp.ethPerPeth(),  DSMath.wmul(lockedCollateral, wethOracle.readPrice()));
+        uint maxScd = DSMath.wdiv(collateralValue, minCollateralRatio);
+        console.log("current debt: ", totalDebt);
+        console.log("collateralValue: ", collateralValue);
+        console.log("maxScd: ", maxScd);
+
+        uint scdDrawn = maxScd - totalDebt;
+        
+        vm.expectRevert("scd: insufficient collateral in the vault");
+        cdp.drawScd(vaultId, scdDrawn);
+        vm.stopPrank();
+    }
 }
 
