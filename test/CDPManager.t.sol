@@ -50,18 +50,7 @@ contract CDPManagerTest is Test{
     // 10 usd
     uint govOraclePrice = 10 * DSMath.WAD;
 
-    function beforeTestSetup(
-        bytes4 testSelector
-    ) public pure returns (bytes[] memory beforeTestCalldata) {
-        if (
-            testSelector == this.test_multiple_drawing_scd.selector ||
-            testSelector == this.test_draw_scd_insufficient_collateral.selector
-        ) {
-            beforeTestCalldata = new bytes[](1);
-            beforeTestCalldata[0] = abi.encodePacked(this.test_drawing_scd.selector);
-        }
-    }
-
+    
     function setUp() public {
         TokenFactory token_factory = new TokenFactory();
         scd = token_factory.deployToken("single collateral dai", "SCD", owner);
@@ -99,8 +88,12 @@ contract CDPManagerTest is Test{
         wethOracle.setPrice(wethOraclePrice);
         govOracle.setPrice(govOraclePrice);
         scd.grantRole(keccak256("MINTER_ROLE"), address(cdp));
+        scd.grantRole(keccak256("MINTER_ROLE"), address(this));
+        scd.grantRole(keccak256("BURNER_ROLE"), address(cdp));
         weth.grantRole(keccak256("MINTER_ROLE"), address(this));
         peth.grantRole(keccak256("MINTER_ROLE"), address(cdp));
+        peth.grantRole(keccak256("BURNER_ROLE"), address(cdp));
+        gov.grantRole(keccak256("MINTER_ROLE"), address(this));
         vm.stopPrank();
 
         for(uint i=0; i < users.length; ++i){
@@ -204,9 +197,14 @@ contract CDPManagerTest is Test{
         assertEq(normalizedDebt, DSMath.rdiv(scdDrawn, cdp.stabilityFeeMul()));
         assertEq(normalizedTotalDebt, DSMath.rdiv(scdDrawn, cdp.totalFeeMul()));
         assertEq(cdp.totalDebt(),  DSMath.rdiv(scdDrawn, cdp.stabilityFeeMul()));
+
+        vm.stopPrank();
     }
 
     function test_multiple_drawing_scd() public {
+        // First set up the vault with initial debt
+        test_drawing_scd();
+
         address alice = users[0];
         vm.startPrank(alice);
 
@@ -230,7 +228,10 @@ contract CDPManagerTest is Test{
         vm.stopPrank();
     }
 
-    function test_rever_draw_scd_insufficient_collateral() public {
+    function test_revert_draw_scd_insufficient_collateral() public {
+        // First set up the vault with initial debt
+        test_drawing_scd();
+
         address alice = users[0];
         vm.startPrank(alice);
 
@@ -250,6 +251,131 @@ contract CDPManagerTest is Test{
         vm.expectRevert("scd: insufficient collateral in the vault");
         cdp.drawScd(vaultId, scdDrawn);
         vm.stopPrank();
+    }
+
+    function test_revert_drawing_scd_unauthorized() public {
+        // First set up the vault with initial debt
+        test_drawing_scd();
+
+        address bob = users[1];
+        vm.startPrank(bob);
+
+        uint vaultId = 0;
+        uint scdDrawn = 10 * DSMath.WAD;
+
+        vm.expectRevert("scd: auth failed");
+        cdp.drawScd(vaultId, scdDrawn);
+
+        vm.stopPrank();
+    }
+
+    function test_wiping_debt() public {
+        // First set up the vault with debt
+        test_drawing_scd();
+
+        address alice = users[0];
+        // skip forward a month
+        skip(86400 * 31);
+
+        uint vaultId = 0;
+
+        uint totalDebtBefore = cdp.getDebt(vaultId);
+        ( ,uint lockedCollateralBefore, uint normalizedDebtBefore, uint normalizedTotalDebtBefore) = cdp.vaultIdToVault(vaultId);
+        uint vaultDebt = DSMath.rmul(normalizedDebtBefore, cdp.getStabilityFeeMul());
+        uint govDebt = DSMath.wdiv(cdp.getGovDebt(vaultId), govOracle.readPrice());
+        uint aliceSCDBalanceBefore = scd.balanceOf(alice);
+        
+        // remaining
+        uint remainingSCD = vaultDebt - aliceSCDBalanceBefore;
+
+        console.log("aliceSCDBalanceBefore: ", aliceSCDBalanceBefore);
+        console.log("remainingSCD: ", remainingSCD);
+        // mint enough scd to allow closing the vault
+        scd.mint(alice, remainingSCD);
+        gov.mint(alice, govDebt);
+
+        // wipe debt
+        vm.startPrank(alice);
+        scd.approve(address(cdp), vaultDebt);
+        gov.approve(address(cdp), govDebt);
+        cdp.wipeDebt(vaultId, vaultDebt);
+
+        uint totalDebtAfter = cdp.getDebt(vaultId);
+        ( ,uint lockedCollateralAfter, uint normalizedDebtAfter, uint normalizedTotalDebtAfter) = cdp.vaultIdToVault(vaultId);
+        uint aliceSCDBalanceAfter = scd.balanceOf(alice);
+        uint aliceGovBalanceAfter = gov.balanceOf(alice);
+        assertEq(lockedCollateralBefore, lockedCollateralAfter);
+        assertEq(normalizedDebtAfter, 0);
+        assertEq(normalizedTotalDebtAfter, 0);
+        assertEq(totalDebtAfter, 0);
+        assertEq(aliceSCDBalanceAfter, 0);
+        assertEq(aliceGovBalanceAfter, 0);
+
+        vm.stopPrank();
+    }
+
+    function test_freeing_collateral() public {
+        // First set up the vault and wipe the debt
+        test_wiping_debt();
+
+        address alice = users[0];
+        vm.startPrank(alice);
+
+        uint vaultId = 0;
+
+        uint alicePethBalanceBefore = peth.balanceOf(alice);
+        uint cdpPethBalanceBefore = peth.balanceOf(address(cdp));
+        ( , uint lockedCollateral, , ) = cdp.vaultIdToVault(vaultId);
+        console.log(lockedCollateral);
+        
+        cdp.unlockCollateral(vaultId, lockedCollateral);
+        uint alicePethBalanceAfter = peth.balanceOf(alice);
+        uint cdpPethBalanceAfter = peth.balanceOf(address(cdp));
+
+        assertEq(alicePethBalanceAfter, alicePethBalanceBefore + lockedCollateral);
+        assertEq(cdpPethBalanceAfter, cdpPethBalanceBefore - lockedCollateral);
+
+        vm.stopPrank();
+    }
+
+    function test_revert_freeing_collateral_unauthorized() public {
+        // First set up the vault and wipe the debt
+        test_wiping_debt();
+
+        address bob = users[1];
+        vm.startPrank(bob);
+
+        uint vaultId = 0;
+        ( , uint lockedCollateral, , ) = cdp.vaultIdToVault(vaultId); 
+
+        vm.expectRevert("scd: auth failed");
+        cdp.unlockCollateral(vaultId, lockedCollateral);
+        vm.stopPrank();
+    }
+
+    function test_exiting() public {    
+        test_freeing_collateral();
+
+        address alice = users[0];
+        vm.startPrank(alice);
+
+        uint alicePethBalanceBefore = peth.balanceOf(alice);
+        uint aliceWethBalanceBefore = weth.balanceOf(alice);
+        uint cpdPethBalanceBefore = peth.balanceOf(address(cdp));
+        uint wethAmount = DSMath.rmul(DSMath.wmul(cdp.ethPerPeth(), alicePethBalanceBefore), spread);
+        cdp.exit(alicePethBalanceBefore);
+
+        uint alicePethBalanceAfter = peth.balanceOf(alice);
+        uint aliceWethBalanceAfter = weth.balanceOf(alice);
+        uint cpdPethBalanceAfter = peth.balanceOf(address(cdp));
+
+
+        assertEq(alicePethBalanceAfter, 0);
+        assertEq(aliceWethBalanceAfter, aliceWethBalanceBefore + wethAmount);
+        assertEq(cpdPethBalanceBefore, 0);
+        assertEq(cpdPethBalanceAfter, 0);
+        vm.stopPrank();
+        
     }
 }
 

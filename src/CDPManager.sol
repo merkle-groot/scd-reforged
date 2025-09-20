@@ -186,8 +186,7 @@ contract CDPManager {
     function exit(uint pethAmount) external{
         require(!off || out, "scd: The system is shutdown");
         uint bidAmount = bid(pethAmount);
-        require(peth.transferFrom(msg.sender, address(this), pethAmount), "scd: Not enough balance/approval");
-        peth.burn(pethAmount);
+        peth.burn(msg.sender, pethAmount);
         require(weth.transfer(msg.sender, bidAmount));
     }
 
@@ -205,7 +204,7 @@ contract CDPManager {
         uint debtValue =  DSMath.wmul(getDebt(vaultId),  DSMath.wmul(scdOracle.readPrice(), minCollateralRatio));
         console.log("===> collateralValue: ", collateralValue);
         console.log("===> debtValue: ", debtValue);
-        return debtValue < collateralValue;
+        return debtValue <= collateralValue;
     }
 
     function openVault() external returns (uint) {
@@ -230,6 +229,7 @@ contract CDPManager {
         require(!off, "scd: The system is shutdown");
 
         Vault storage vault = vaultIdToVault[vaultId];
+        require(vault.owner == msg.sender, "scd: auth failed");
         require(vaultId < currentVaultId && vault.owner == msg.sender, "scd: Invalid vault id");
 
         console.log("dai taken: ", scdAmount);
@@ -243,4 +243,40 @@ contract CDPManager {
         require(isSafe(vaultId), "scd: insufficient collateral in the vault");
         scd.mint(msg.sender, scdAmount);
     }
+
+    function wipeDebt(uint vaultId, uint scdAmount) external {
+        require(!off, "scd: The system is shutdown");
+
+        Vault storage vault = vaultIdToVault[vaultId];
+        scd.burn(vault.owner, scdAmount);
+
+        // reduce proportional amount of gov debt
+        uint debtOwed = getDebt(vaultId);
+        uint debtReduction = DSMath.rdiv(scdAmount, stabilityFeeMul);
+        uint govDebtInDai = DSMath.rmul(scdAmount, DSMath.rdiv(getGovDebt(vaultId), debtOwed));
+
+        vault.normalizedDebt -= debtReduction;
+        vault.normalizedTotalDebt -= DSMath.rdiv(scdAmount + govDebtInDai, totalFeeMul);
+
+        totalDebt -= debtReduction;
+
+        if(governanceFee != DSMath.RAY){
+            uint govDebt = DSMath.wdiv(govDebtInDai, govOracle.readPrice());
+            require(gov.transferFrom(msg.sender, address(this), govDebt), "scd: Not enough balance/approval");
+        }
+    }
+
+    function unlockCollateral(uint vaultId, uint pethAmount) external {
+        require(!off, "scd: The system is shutdown");
+
+        Vault storage vault = vaultIdToVault[vaultId];
+        require(vault.owner == msg.sender, "scd: auth failed");
+
+        vault.lockedCollateral -= pethAmount;
+        require(peth.transfer(msg.sender, pethAmount), "scd: Not enough peth in the contract");
+        require(isSafe(vaultId), "scd: insufficient collateral in the vault");
+
+        // Todo: prevent leaving dust eth in the vault
+    }
+
 }
